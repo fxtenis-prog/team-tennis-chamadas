@@ -119,4 +119,4 @@ el('importRoster').onchange=async e=>{const f=e.target.files[0];if(!f)return;try
 for(const d of days){const o=document.createElement('option');o.value=d;o.textContent=d;el('studentDay').append(o)}
 const now=new Date();el('date').value=new Date(now.getTime()-now.getTimezoneOffset()*60000).toISOString().slice(0,10);el('studentDay').value=days[(now.getDay()+6)%7];rebuild();
 if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
-</script><script src="diario.js"></script><script src="nuvem.js"></script><script async src="https://accounts.google.com/gsi/client"></script></body></html>
+</script><script src="diario.js"></script><script src="jszip.min.js"></script><script src="lista-oficial.js"></script><script src="nuvem.js"></script><script async src="https://accounts.google.com/gsi/client"></script></body></html>

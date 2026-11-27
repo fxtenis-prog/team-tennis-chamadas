@@ -3,6 +3,7 @@
     Osias:'1Cu3GEdy4wXvRSra3fd7jms8T0J9pGtQVXUF4oZ_Es2A',
     Pedro:'1zNk_4uLMsYGBW2tUq-65cQZTvIdu3kAX_xZHbc9-3Y4'
   };
+  const googleClientId='234420364719-8kbakbe0pmfk1hid2t6m09fm0briro4t.apps.googleusercontent.com';
   const ownerKey='chamadas-professor-local', queueKey='chamadas-envios-v1';
   const hint=el('syncStatus');
   let teacher=localStorage.getItem(ownerKey), token='', expiry=0, busy=false, manager=false;
@@ -136,7 +137,7 @@
       hint.textContent='Sincronizado · '+new Date().toLocaleTimeString('pt-BR')+migrationNotice;
     } catch(e){if(e.status===401)clearSession();fail(e);}finally{busy=false;}
   }
-  async function loadRoster(who){
+  async function loadSharedRoster(who){
     const rows=(await request(who,false,null,'E2:H')).values||[];
     const key=x=>[x.nome.trim().toLocaleLowerCase('pt-BR'),x.dia,x.hora].join('|');
     const known=new Set(roster.map(key)), added=[];
@@ -148,9 +149,58 @@
     if(added.length){roster.push(...added);persist();rebuild();}
     return added.length;
   }
-  el('refreshRoster').onclick=async()=>{
+  let sourceToken='', sourceExpiry=0;
+  const refreshButton=el('refreshRoster');
+  function requestWorkbookAccess(){
+    if(sourceToken&&Date.now()<sourceExpiry)return Promise.resolve(sourceToken);
+    if(!window.google?.accounts?.oauth2)return Promise.reject(new Error('Conecte à internet para acessar a planilha oficial.'));
+    return new Promise((resolve,reject)=>{
+      const oauth=google.accounts.oauth2;
+      oauth.initTokenClient({
+        client_id:googleClientId,
+        scope:driveReadScope,
+        callback:response=>{
+          if(!response.access_token||!oauth.hasGrantedAllScopes(response,driveReadScope)){
+            reject(new Error('Autorize o acesso ao Drive da conta que abre a planilha oficial.'));
+            return;
+          }
+          sourceToken=response.access_token;
+          sourceExpiry=Date.now()+1000*(Number(response.expires_in)-60);
+          resolve(sourceToken);
+        },
+        error_callback:()=>reject(new Error('A autorização para ler a planilha oficial foi interrompida.'))
+      }).requestAccessToken({prompt:'select_account'});
+    });
+  }
+  async function refreshOfficialRoster(){
+    const accessToken=await requestWorkbookAccess();
+    const url='https://www.googleapis.com/drive/v3/files/'+officialWorkbookId+'?alt=media';
+    const response=await fetch(url,{cache:'no-store',headers:{Authorization:'Bearer '+accessToken}});
+    if(!response.ok){
+      if([401,403,404].includes(response.status)){sourceToken='';sourceExpiry=0;}
+      throw Error('Não foi possível ler a planilha oficial no Drive ('+response.status+').');
+    }
+    const entries=await readOfficialRoster(await response.arrayBuffer(),'Osias');
+    const previous=roster;
+    const result=reconcileOfficialRoster(previous,entries,'Osias');
+    roster=result.roster;
+    if(!persist()){
+      roster=previous;
+      throw Error('Não foi possível salvar a lista neste aparelho.');
+    }
+    rebuild();
+    alert(result.active+' matrículas ativas atualizadas da planilha oficial.');
+  }
+  refreshButton.onclick=async()=>{
     if(!teacher||!token)return;
-    try{const count=await loadRoster(teacher);alert(count+' novos horários importados.');}catch(e){fail(e);}
+    refreshButton.disabled=true;
+    try{
+      if(teacher==='Osias')await refreshOfficialRoster();
+      else{
+        const count=await loadSharedRoster(teacher);
+        alert(count+' novos horários importados da lista compartilhada.');
+      }
+    }catch(e){fail(e);}finally{refreshButton.disabled=false;}
   };
   async function connect(response){
     if(!response.access_token)return fail(new Error('Acesso Google não concluído.'));
@@ -204,18 +254,19 @@
       el('peerTab').hidden=!manager;
       saveSession();
       el('refreshRoster').hidden=false;
-      loadInitialRoster=!roster.length&&!data.seen.size;
+      refreshButton.textContent=who==='Osias'?'Atualizar turmas da lista oficial':'Atualizar turmas da lista compartilhada';
+      loadInitialRoster=who==='Pedro'&&!roster.length&&!data.seen.size;
       rebuild();
     } catch(e){clearSession();fail(e);return;}finally{busy=false;}
     await sync();
     if(loadInitialRoster&&token){
-      try{await loadRoster(teacher);}catch(e){fail(e);}
+      try{await loadSharedRoster(teacher);}catch(e){fail(e);}
     }
   }
   el('connect').onclick=()=>{
     if(busy)return;
     if(!window.google?.accounts?.oauth2){hint.textContent='Conecte à internet para entrar com Google.';return;}
-    google.accounts.oauth2.initTokenClient({client_id:'234420364719-8kbakbe0pmfk1hid2t6m09fm0briro4t.apps.googleusercontent.com',scope:'https://www.googleapis.com/auth/spreadsheets',callback:connect}).requestAccessToken({prompt:'select_account'});
+    google.accounts.oauth2.initTokenClient({client_id:googleClientId,scope:'https://www.googleapis.com/auth/spreadsheets',callback:connect}).requestAccessToken({prompt:'select_account'});
   };
   el('peerDate').value=el('date').value;el('peerDate').onchange=drawPeer;
   window.addEventListener('online',resume);window.addEventListener('focus',sync);
