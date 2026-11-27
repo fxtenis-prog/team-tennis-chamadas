@@ -40,3 +40,64 @@ function readAttendanceLog(rows) {
   }
   return {roster:students,db:{version:3,lessons,adjustments},seen};
 }
+
+// IDs remotos prevalecem quando nome, dia e horário identificam uma única matrícula.
+function mergeInitialAttendance(local, remote) {
+  const target = attendanceState(remote.roster, remote.db);
+  const source = attendanceState(local.roster, local.db);
+  const merged = new Map(target);
+  const conflicts = [];
+  const keyFor = s => JSON.stringify([s.nome.normalize('NFC').trim().replace(/\s+/g,' ').toLocaleLowerCase('pt-BR'),s.dia,s.hora.padStart(5,'0')]);
+  const ids = new Map();
+  for (const student of local.roster) {
+    const exact = remote.roster.find(s=>s.id===student.id);
+    const matches = remote.roster.filter(s=>keyFor(s)===keyFor(student));
+    const uniqueLocal = local.roster.filter(s=>keyFor(s)===keyFor(student)).length===1;
+    ids.set(student.id, exact?.id ?? (uniqueLocal && matches.length===1 ? matches[0].id : student.id));
+  }
+  const normalizedLesson = key => key.replace(/\|(\d):/g,'|0$1:');
+  const remoteLessons = new Map(Object.keys(remote.db.lessons).map(k=>[normalizedLesson(k),k]));
+  const lessonKey = k => remoteLessons.get(normalizedLesson(k)) || normalizedLesson(k);
+  const creditKey = id => {
+    if (typeof id!=='string') return id;
+    try {
+      const [lesson, student] = JSON.parse(id);
+      return JSON.stringify([lessonKey(lesson),ids.get(student)||student]);
+    } catch { return id; }
+  };
+  for (const [key, value] of source) {
+    const [type, id, student] = JSON.parse(key);
+    let mapped = key, candidate = value;
+    if (type==='student') {
+      mapped = JSON.stringify([type,ids.get(id)]);
+      candidate = {...value,id:ids.get(id)};
+      if (id!==ids.get(id)) continue;
+    } else if (type==='attendance') {
+      mapped = JSON.stringify([type,lessonKey(id),ids.get(student)||student]);
+      if (!value) continue;
+    } else if (type==='cancellation') {
+      mapped = JSON.stringify([type,lessonKey(id)]);
+      candidate = {...value,rainIds:[...new Set(value.rainIds.map(s=>ids.get(s)||s))].sort()};
+    } else if (type==='adjustment' && value.kind==='manual') {
+      candidate = {...value,student:ids.get(value.student)||value.student};
+    } else if (type==='adjustment' && value.kind==='settle') {
+      const credit=creditKey(value.credit);
+      candidate={...value,credit};
+      if(id.startsWith('baixa:')) mapped=JSON.stringify([type,'baixa:'+credit]);
+    }
+
+    if (!merged.has(mapped)) {
+      merged.set(mapped,candidate);
+      continue;
+    }
+    const current=merged.get(mapped);
+    const comparable=type==='cancellation' ? {...current,rainIds:[...new Set(current.rainIds)].sort()} : current;
+    if (JSON.stringify(comparable)===JSON.stringify(candidate)) continue;
+    if (type==='cancellation' && current.rain && candidate.rain && current.reason===candidate.reason) {
+      merged.set(mapped,{...current,rainIds:[...new Set([...current.rainIds,...candidate.rainIds])]});
+    } else {
+      conflicts.push({key:mapped,nuvem:current,aparelho:candidate});
+    }
+  }
+  return {target,merged,conflicts};
+}
