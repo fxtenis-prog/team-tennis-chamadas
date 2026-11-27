@@ -151,6 +151,8 @@
   }
   let sourceToken='', sourceExpiry=0;
   const refreshButton=el('refreshRoster');
+  const workbookFallback=el('officialFileFallback');
+  const workbookInput=el('officialFile');
   function requestWorkbookAccess(){
     if(sourceToken&&Date.now()<sourceExpiry)return Promise.resolve(sourceToken);
     if(!window.google?.accounts?.oauth2)return Promise.reject(new Error('Conecte à internet para acessar a planilha oficial.'));
@@ -172,15 +174,27 @@
       }).requestAccessToken({prompt:'select_account'});
     });
   }
-  async function refreshOfficialRoster(){
+  async function readWorkbookFromDrive(){
     const accessToken=await requestWorkbookAccess();
     const url='https://www.googleapis.com/drive/v3/files/'+officialWorkbookId+'?alt=media';
-    const response=await fetch(url,{cache:'no-store',headers:{Authorization:'Bearer '+accessToken}});
+    let response;
+    for(let attempt=0;attempt<2;attempt++){
+      try{
+        response=await fetch(url,{cache:'no-store',headers:{Authorization:'Bearer '+accessToken}});
+        break;
+      }catch(error){
+        if(!(error instanceof TypeError))throw error;
+        if(attempt===1)throw Error('O app não conseguiu se conectar ao Google Drive. Tente novamente ou selecione o arquivo oficial abaixo.');
+      }
+    }
     if(!response.ok){
       if([401,403,404].includes(response.status)){sourceToken='';sourceExpiry=0;}
-      throw Error('Não foi possível ler a planilha oficial no Drive ('+response.status+').');
+      throw Error('O Google Drive recusou a leitura da planilha oficial ('+response.status+').');
     }
-    const entries=await readOfficialRoster(await response.arrayBuffer(),'Osias');
+    return response.arrayBuffer();
+  }
+  async function applyOfficialWorkbook(buffer){
+    const entries=await readOfficialRoster(buffer,'Osias');
     const previous=roster;
     const result=reconcileOfficialRoster(previous,entries,'Osias');
     roster=result.roster;
@@ -189,18 +203,37 @@
       throw Error('Não foi possível salvar a lista neste aparelho.');
     }
     rebuild();
+    workbookFallback.hidden=true;
     alert(result.active+' matrículas ativas atualizadas da planilha oficial.');
   }
+  function setRosterControlsBusy(busy){
+    refreshButton.disabled=busy;
+    workbookInput.disabled=busy;
+  }
   refreshButton.onclick=async()=>{
-    if(!teacher||!token)return;
-    refreshButton.disabled=true;
+    if(!teacher||!token||refreshButton.disabled)return;
+    setRosterControlsBusy(true);
     try{
-      if(teacher==='Osias')await refreshOfficialRoster();
+      if(teacher==='Osias')await applyOfficialWorkbook(await readWorkbookFromDrive());
       else{
         const count=await loadSharedRoster(teacher);
         alert(count+' novos horários importados da lista compartilhada.');
       }
-    }catch(e){fail(e);}finally{refreshButton.disabled=false;}
+    }catch(error){
+      workbookFallback.hidden=teacher!=='Osias';
+      fail(error);
+    }finally{setRosterControlsBusy(false);}
+  };
+  workbookInput.onchange=async()=>{
+    const file=workbookInput.files[0];
+    if(!file||teacher!=='Osias'||workbookInput.disabled)return;
+    setRosterControlsBusy(true);
+    try{await applyOfficialWorkbook(await file.arrayBuffer());}
+    catch{fail(Error('Não consegui importar este arquivo. Selecione a planilha oficial de cobranças em formato .xlsm.'));}
+    finally{
+      workbookInput.value='';
+      setRosterControlsBusy(false);
+    }
   };
   async function connect(response){
     if(!response.access_token)return fail(new Error('Acesso Google não concluído.'));
@@ -212,6 +245,7 @@
     el('peerView').replaceChildren();el('peerCredits').replaceChildren();
     showTab('mine');
     el('refreshRoster').hidden=true;
+    workbookFallback.hidden=true;
     token=response.access_token;expiry=Date.now()+1000*(response.expires_in-60);
     let loadInitialRoster=false;
     try{
